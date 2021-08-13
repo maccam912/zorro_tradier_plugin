@@ -138,8 +138,10 @@ pub extern "C" fn BrokerHistory2(
     log(&format!("{:?}", asset_str));
     log(&format!("{:?}", start));
     log(&format!("{:?}", end));
-    let month_back = chrono::offset::Utc::now().checked_sub_signed(chrono::Duration::days(30));
+    let month_back = chrono::offset::Utc::now().checked_sub_signed(chrono::Duration::days(29));
     let correct_start = max(start, month_back.unwrap());
+
+    log(&format!("{:?}", correct_start));
     let history = get_time_and_sales(
         asset_str.into(),
         Some("1min".into()),
@@ -151,16 +153,18 @@ pub extern "C" fn BrokerHistory2(
     match history {
         Ok(historyseries) => {
             let candles: Vec<Data> = historyseries.series.data;
-            let t6_candles: Vec<T6> = candles
+            let mut t6_candles: Vec<T6> = candles
                 .iter()
                 .map(|quote| {
                     let c: T6 = quote.into();
                     c
                 })
                 .collect();
+            t6_candles.reverse();
             let t6_candles_ptr: *const T6 = t6_candles.as_ptr();
-            unsafe { copy_nonoverlapping(t6_candles_ptr, ticks, candles.len()) }
-            candles.len() as c_int
+            // TODO this unsafe line breaks
+            unsafe { copy_nonoverlapping(t6_candles_ptr, ticks, t6_candles.len()) }
+            t6_candles.len() as c_int
         }
         Err(err) => {
             log(&(err.to_string()));
