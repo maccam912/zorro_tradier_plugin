@@ -1,6 +1,14 @@
 #![allow(non_snake_case)]
 
-use std::{env, ffi::{CStr, CString}, lazy::SyncLazy, sync::Mutex, thread::sleep, time::Duration};
+use std::{
+    env,
+    ffi::{CStr, CString},
+    intrinsics::copy_nonoverlapping,
+    lazy::SyncLazy,
+    sync::Mutex,
+    thread::sleep,
+    time::Duration,
+};
 
 use libc::{c_char, c_double, c_int, c_void};
 
@@ -8,6 +16,8 @@ use crate::{
     util::{self, t6_date_to_epoch_timestamp, timestamp_to_datetime},
     Date, Var, T6,
 };
+use tradier::market_data;
+use tradier::market_data::get_time_and_sales::{get_time_and_sales, Data};
 
 #[no_mangle]
 #[allow(unused_variables)]
@@ -65,7 +75,7 @@ pub extern "C" fn BrokerLogin(
     Type: *const c_char,
     Accounts: *const c_char,
 ) -> c_int {
-    let profile = tradier::account::get_user_profile::get_user_profile();
+    let profile = tradier::account::get_user_profile();
     if profile.is_ok() {
         1
     } else {
@@ -124,12 +134,36 @@ pub extern "C" fn BrokerHistory2(
     let start = timestamp_to_datetime(t6_date_to_epoch_timestamp(tStart as f64));
     let end = timestamp_to_datetime(t6_date_to_epoch_timestamp(tEnd));
     let asset_str = unsafe { CStr::from_ptr(Asset).to_str().unwrap() };
+    log(&format!("{:?}", asset_str));
     log(&format!("{:?}", start));
     log(&format!("{:?}", end));
-    log(&format!("{:?}", asset_str));
-    // let t6_candles_ptr: *const T6 = t6_candles.as_ptr();
+    let history = get_time_and_sales(
+        asset_str.into(),
+        Some("1min".into()),
+        Some(start),
+        Some(end),
+        None,
+    );
+
+    match history {
+        Ok(historyseries) => {
+            let candles: Vec<Data> = historyseries.series.data;
+            let t6_candles: Vec<T6> = candles
+                .iter()
+                .map(|quote| {
+                    let c: T6 = quote.into();
+                    c
+                })
+                .collect();
+            let t6_candles_ptr: *const T6 = t6_candles.as_ptr();
+            unsafe { copy_nonoverlapping(t6_candles_ptr, ticks, candles.len()) }
+            candles.len() as c_int
+        }
+        Err(err) => {
+            log(&(err.to_string()));
+            0
+        }
+    }
     // let t6_candles_mut_ptr: *mut T6 = t6_candles.clone().as_mut_ptr();
-    // unsafe { copy_nonoverlapping(t6_candles_ptr, ticks, t6_candles.len()) }
     // t6_candles.len() as i32
-    0 // Return number of ticks
 }
