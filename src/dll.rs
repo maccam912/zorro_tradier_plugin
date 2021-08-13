@@ -1,6 +1,7 @@
 #![allow(non_snake_case)]
 
 use std::{
+    cmp::max,
     env,
     ffi::{CStr, CString},
     intrinsics::copy_nonoverlapping,
@@ -137,10 +138,12 @@ pub extern "C" fn BrokerHistory2(
     log(&format!("{:?}", asset_str));
     log(&format!("{:?}", start));
     log(&format!("{:?}", end));
+    let month_back = chrono::offset::Utc::now().checked_sub_signed(chrono::Duration::days(30));
+    let correct_start = max(start, month_back.unwrap());
     let history = get_time_and_sales(
         asset_str.into(),
         Some("1min".into()),
-        Some(start),
+        Some(correct_start),
         Some(end),
         None,
     );
