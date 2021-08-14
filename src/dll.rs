@@ -12,6 +12,13 @@ use std::{
 };
 
 use libc::{c_char, c_double, c_int, c_void};
+use log::LevelFilter;
+use log4rs::{
+    append::file::FileAppender,
+    config::{Appender, Root},
+    encode::pattern::PatternEncoder,
+    Config,
+};
 
 use crate::{
     util::{self, t6_date_to_epoch_timestamp, timestamp_to_datetime},
@@ -54,13 +61,29 @@ pub(crate) fn log(msg: &str) {
     }
 }
 
-// #[no_mangle]
-// pub extern "C" fn BrokerCommand(command: c_int, data: c_int) -> Var {
-//     0.0 // Return 0 for all unimplemented commands
-// }
+#[no_mangle]
+pub extern "C" fn BrokerCommand(command: c_int, data: c_int) -> Var {
+    if command == 43 {
+        300.0
+    } else {
+        0.0 // Return 0 for all unimplemented commands
+    }
+}
 
 #[no_mangle]
 pub extern "C" fn BrokerOpen(Name: *const c_char, fpError: FpType, fpProgress: FpType) -> c_int {
+    let logfile = FileAppender::builder()
+        .encoder(Box::new(PatternEncoder::new("{l} - {m}\n")))
+        .build("log/output.log")
+        .unwrap();
+
+    let config = Config::builder()
+        .appender(Appender::builder().build("logfile", Box::new(logfile)))
+        .build(Root::builder().appender("logfile").build(LevelFilter::Info))
+        .unwrap();
+
+    log4rs::init_config(config).unwrap();
+
     let _ = util::copy_into("TR", Name);
     if let Ok(mut state) = STATE.lock() {
         state.handle = Some(fpError);
@@ -132,16 +155,13 @@ pub extern "C" fn BrokerHistory2(
     nTicks: c_int,
     ticks: *mut T6,
 ) -> c_int {
+    assert_eq!(nTickMinutes, 1);
     let start = timestamp_to_datetime(t6_date_to_epoch_timestamp(tStart as f64));
     let end = timestamp_to_datetime(t6_date_to_epoch_timestamp(tEnd));
     let asset_str = unsafe { CStr::from_ptr(Asset).to_str().unwrap() };
-    log(&format!("{:?}", asset_str));
-    log(&format!("{:?}", start));
-    log(&format!("{:?}", end));
     let month_back = chrono::offset::Utc::now().checked_sub_signed(chrono::Duration::days(29));
     let correct_start = max(start, month_back.unwrap());
 
-    log(&format!("{:?}", correct_start));
     let history = get_time_and_sales(
         asset_str.into(),
         Some("1min".into()),
@@ -161,9 +181,9 @@ pub extern "C" fn BrokerHistory2(
                 })
                 .collect();
             t6_candles.reverse();
+            t6_candles.truncate(nTicks as usize);
             let t6_candles_ptr: *const T6 = t6_candles.as_ptr();
-            // TODO this unsafe line breaks
-            unsafe { copy_nonoverlapping(t6_candles_ptr, ticks, t6_candles.len()) }
+            unsafe { copy_nonoverlapping(t6_candles_ptr, ticks, t6_candles.len()) };
             t6_candles.len() as c_int
         }
         Err(err) => {
