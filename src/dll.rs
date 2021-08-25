@@ -11,11 +11,11 @@ use std::{
     time::Duration,
 };
 
-use libc::{c_char, c_double, c_int, c_void};
+use libc::{abs, c_char, c_double, c_int, c_void};
 use log::LevelFilter;
 use log4rs::{
     append::file::FileAppender,
-    config::{Appender, Root},
+    config::{Appender, Logger, Root},
     encode::pattern::PatternEncoder,
     Config,
 };
@@ -24,8 +24,8 @@ use crate::{
     util::{self, t6_date_to_epoch_timestamp, timestamp_to_datetime},
     Date, Var, T6,
 };
-use tradier::market_data;
 use tradier::market_data::get_time_and_sales::{get_time_and_sales, Data};
+use tradier::{Class, OrderType, Side, TradierConfig};
 
 #[no_mangle]
 #[allow(unused_variables)]
@@ -39,7 +39,7 @@ type FpType = extern "C" fn(*const c_char) -> c_int;
 pub(crate) struct State {
     pub(crate) handle: Option<extern "C" fn(*const c_char) -> c_int>,
     pub(crate) subscriptions: Vec<String>,
-    pub(crate) access_token: String,
+    pub(crate) config: Option<TradierConfig>,
 }
 unsafe impl Send for State {}
 unsafe impl Sync for State {}
@@ -48,7 +48,7 @@ pub(crate) static STATE: SyncLazy<Mutex<State>> = SyncLazy::new(|| {
     Mutex::new(State {
         handle: None,
         subscriptions: vec![],
-        access_token: "".into(),
+        config: None,
     })
 });
 
@@ -79,6 +79,7 @@ pub extern "C" fn BrokerOpen(Name: *const c_char, fpError: FpType, fpProgress: F
 
     let config = Config::builder()
         .appender(Appender::builder().build("logfile", Box::new(logfile)))
+        .logger(Logger::builder().build("app::backend::db", LevelFilter::Debug))
         .build(Root::builder().appender("logfile").build(LevelFilter::Info))
         .unwrap();
 
@@ -99,7 +100,23 @@ pub extern "C" fn BrokerLogin(
     Type: *const c_char,
     Accounts: *const c_char,
 ) -> c_int {
-    let profile = tradier::account::get_user_profile();
+    let type_string: String = unsafe { CStr::from_ptr(Type).to_str().unwrap().into() };
+
+    let endpoint: String = if type_string == "Real".to_string() {
+        "https://api.tradier.com".into()
+    } else {
+        "https://sandbox.tradier.com".into()
+    };
+
+    let token = unsafe { CStr::from_ptr(Pwd) };
+    let token_str: String = token.to_str().unwrap().into();
+    let config = TradierConfig {
+        token: token_str,
+        endpoint,
+    };
+    STATE.lock().unwrap().config = Some(config.clone());
+
+    let profile = tradier::account::get_user_profile::get_user_profile(&config);
     if profile.is_ok() {
         1
     } else {
@@ -159,10 +176,12 @@ pub extern "C" fn BrokerHistory2(
     let start = timestamp_to_datetime(t6_date_to_epoch_timestamp(tStart as f64));
     let end = timestamp_to_datetime(t6_date_to_epoch_timestamp(tEnd));
     let asset_str = unsafe { CStr::from_ptr(Asset).to_str().unwrap() };
-    let month_back = chrono::offset::Utc::now().checked_sub_signed(chrono::Duration::days(29));
+    let month_back = chrono::offset::Utc::now().checked_sub_signed(chrono::Duration::days(27));
     let correct_start = max(start, month_back.unwrap());
+    let config = STATE.lock().unwrap().config.clone().unwrap();
 
     let history = get_time_and_sales(
+        &config,
         asset_str.into(),
         Some("1min".into()),
         Some(correct_start),
@@ -187,10 +206,59 @@ pub extern "C" fn BrokerHistory2(
             t6_candles.len() as c_int
         }
         Err(err) => {
-            log(&(err.to_string()));
+            // log(&(err.to_string()));
             0
         }
     }
     // let t6_candles_mut_ptr: *mut T6 = t6_candles.clone().as_mut_ptr();
     // t6_candles.len() as i32
+}
+
+#[no_mangle]
+pub extern "C" fn BrokerBuy2(
+    Asset: *const c_char,
+    Amount: c_int,
+    StopDist: c_double,
+    Limit: c_double,
+    pPrice: *const c_double,
+    pFill: *const c_int,
+) -> c_int {
+    let config = STATE.lock().unwrap().config.clone().unwrap();
+
+    let acct = &tradier::account::get_user_profile::get_user_profile(&config)
+        .unwrap()
+        .profile
+        .account[0]
+        .account_number;
+
+    let side = if Amount < 0 { Side::sell } else { Side::buy };
+
+    let quantity: u64 = Amount.abs() as u64;
+    unsafe {
+        let symbol: String = CStr::from_ptr(Asset)
+            .to_str()
+            .expect("Couldn't get Asset as string")
+            .into();
+
+        log::warn!("{:?}", symbol);
+        log::warn!("{:?}", side);
+        log::warn!("{:?}", quantity);
+
+        let resp_option = tradier::trading::orders::post_order(
+            &config,
+            acct.into(),
+            Class::equity,
+            symbol,
+            side,
+            quantity,
+            OrderType::market,
+            tradier::Duration::gtc,
+            None,
+            None,
+            None,
+        );
+        log::warn!("Response: {:?}", resp_option);
+        let resp = resp_option.unwrap();
+        resp.order.id as c_int
+    }
 }
